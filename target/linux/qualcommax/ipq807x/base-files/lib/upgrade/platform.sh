@@ -27,6 +27,32 @@ xiaomi_initramfs_prepare() {
 	ubiformat /dev/mtd$kern_mtdnum -y
 }
 
+dynalink_dl_wrx36_init_uboot_env() {
+	fw_setenv mtdids 'nand0=nand0'
+	# Set mtdparts env var depending on current
+	# Use offset of mtd18 (rootfs)
+	local mtd18_offset=$(cat /sys/class/mtd/mtd18/offset 2>/dev/null)
+	if [ "$mtd18_offset" -eq $((0x1000000)) ]; then
+		fw_setenv mtdparts 'mtdparts=nand0:0x6100000@0x1000000(fs),0x6100000@0x7a00000(fs_1)'
+	elif [ "$mtd18_offset" -eq $((0x7a00000)) ]; then
+		fw_setenv mtdparts 'mtdparts=nand0:0x6100000@0x7a00000(fs),0x6100000@0x1000000(fs_1)'
+	else
+		echo "could not determine current OEM partition slot for rootfs. Got offset '$mtd18_offset'"
+		return
+	fi
+	#
+	fw_setenv owrt_boot_usb 'usb start && fatload usb 0:1 0x44000000 openwrt-qualcommax-ipq807x-dynalink_dl-wrx36-initramfs-uImage.itb && bootm 0x44000000'
+	fw_setenv owrt_boot_selected 'if test $owrt_active = 1; then run owrt_boot_slot1; elif test $owrt_active = 2; then run owrt_boot_slot2; fi'
+	fw_setenv owrt_boot_slot1 'setenv bootargs console=ttyMSM0,115200n8 ubi.mtd=rootfs rootfstype=squashfs rootwait; ubi part fs; ubi read 0x44000000 kernel; bootm 0x44000000#config@rt5010w-d350-rev0'
+	fw_setenv owrt_boot_slot2 'setenv bootargs console=ttyMSM0,115200n8 ubi.mtd=rootfs_1 rootfstype=squashfs rootwait; ubi part fs_1; ubi read 0x44000000 kernel; bootm 0x44000000#config@rt5010w-d350-rev0'
+	# Set initial status to boot from the first partition (on whichever OEM partition slot that was decided above)
+	fw_setenv owrt_active 1
+	#
+	# Finish setup: set version variable at the end to signal the process completed successfully
+	fw_setenv bootcmd 'run owrt_boot_usb; run owrt_boot_selected'
+	fw_setenv owrt_env_ver 1
+}
+
 asus_initial_setup() {
 	# Remove existing linux and jffs2 volumes
 	[ "$(rootfs_type)" = "tmpfs" ] || return 0
@@ -57,7 +83,27 @@ platform_do_upgrade() {
 	arcadyan,aw1000|\
 	cmcc,rm2-6|\
 	compex,wpq873|\
-	dynalink,dl-wrx36|\
+	dynalink,dl-wrx36)
+		local env_version_owrt='1'
+		local env_version_device=$(fw_printenv -n owrt_env_ver 2>/dev/null)
+		if [ "$env_version_device" != "$env_version_owrt" ]; then
+			echo "Initializing uboot env as version mismatch was detected. Current is '$env_version_owrt' and device has '$env_version_device'"
+			dynalink_dl_wrx36_init_uboot_env
+		fi
+		#
+		local active_slot_cur=$(fw_printenv -n owrt_active 2>/dev/null)
+		local active_slot_new;
+		if [ "$active_slot_cur" = "1" ]; then
+			CI_UBIPART="rootfs_1"
+			active_slot_new="2"
+		else
+			CI_UBIPART="rootfs"
+			active_slot_new="1"
+		fi
+		fw_setenv owrt_active $active_slot_new
+		#
+		nand_do_upgrade "$1"
+		;;
 	edimax,cax1800|\
 	netgear,rax120v2|\
 	netgear,sxr80|\
